@@ -1,6 +1,6 @@
 {
   "name": "@blitzdev/iphone-mcp",
-  "version": "0.1.18",
+  "version": "0.1.18-blitz.1",
   "description": "MCP server for controlling iOS simulators and physical iPhones",
   "type": "module",
   "license": "MIT",
@@ -20,13 +20,13 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/idb/type-text.py dist/idb/type-text.py",
     "benchmark:gesture-visualization": "node scripts/benchmark-gesture-visualization.mjs",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "npm run build && node --test tests/*.test.mjs && python3 -m unittest discover -s tests -p \"test_*.py\""
   },
   "dependencies": {
-    "@blitzdev/iphone-mcp": "^0.1.15",
     "@inquirer/checkbox": "^5.1.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "express": "^5.1.0",

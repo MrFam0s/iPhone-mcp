@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
+import { randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { resolveBootedUdid } from './idb/idb-client.js'
 import { AXScanClient } from './idb/ax-scan-client.js'
@@ -14,7 +15,8 @@ import { listPhysicalDevices } from './wda/device-discovery.js'
 import { applyScanUiFilters, applyDescribeScreenFilters } from './ui-filters.js'
 import { detectExecutionContext } from './execution-context.js'
 import { wdaManager } from './wda/wda-manager.js'
-import { childEnv } from './child-env.js'
+import { simulatorEnv } from './idb/simulator-env.js'
+import { getIDBClient } from './idb/idb-client.js'
 import { log } from './logger.js'
 import { emitTapGestureVisualization, emitSwipeGestureVisualization } from './gesture-visualization.js'
 
@@ -63,23 +65,8 @@ const singleActionSchema = z.object({
 })
 
 const referenceFrameCache = new Map<string, Promise<{ width: number; height: number }>>()
-const BOOTED_UDID_CACHE_TTL_MS = 5_000
-let cachedBootedUdid: { value: string; expiresAtMs: number } | null = null
-
 async function resolveActionUdid(udid: string): Promise<string> {
-  if (udid !== 'booted') return udid
-
-  const now = Date.now()
-  if (cachedBootedUdid && cachedBootedUdid.expiresAtMs > now) {
-    return cachedBootedUdid.value
-  }
-
-  const resolvedUdid = await resolveBootedUdid()
-  cachedBootedUdid = {
-    value: resolvedUdid,
-    expiresAtMs: now + BOOTED_UDID_CACHE_TTL_MS,
-  }
-  return resolvedUdid
+  return udid === 'booted' ? await resolveBootedUdid() : udid
 }
 
 async function resolveReferenceFrame(udid: string): Promise<{ width: number; height: number }> {
@@ -150,7 +137,7 @@ async function emitVisualizationForAction(params: {
 export function createMcpServer(viewerPort: number) {
   const server = new McpServer({
     name: '@blitzdev/iphone-mcp',
-    version: '0.1.0',
+    version: '0.1.18-blitz.1',
   })
 
   server.registerTool(
@@ -213,11 +200,11 @@ Actions available:
 - tap: Tap at coordinates { x, y, duration? }
 - swipe: Swipe gesture { fromX, fromY, toX, toY, duration?, delta? }
 - button: Press button { button: 'HOME'|'LOCK'|'SIDE_BUTTON'|'APPLE_PAY'|'SIRI', duration? }
-- input-text: Type text { text }
+- input-text: Type text { text }. Simulator text supports the active German QWERTZ (including umlauts) and US QWERTY keyboards. Unsupported layouts/characters fail before any text is sent; no clipboard is used.
 - key: Press key { key: number (HID keycode) | string (character), duration? }
 - key-sequence: Press key sequence { keySequence: (number|string)[] }
 
-Use describe_after to see the screen state after the action.`,
+Use describe_after to verify the screen state after the action. Text is sent as keyboard input, so iOS autocorrection and smart punctuation still apply.`,
       inputSchema: {
         action: z.enum(['tap', 'swipe', 'button', 'input-text', 'key', 'key-sequence']).describe('Type of action'),
         params: z.record(z.string(), z.unknown()).describe('Action parameters (depends on action type)'),
@@ -424,38 +411,36 @@ Use describe_after to see the screen state after all actions complete.`,
     async ({ udid = 'booted' }) => {
       log('MCP', 'log', `get_screenshot udid=${udid}`)
       try {
-        const timestamp = Date.now()
+        const timestamp = randomUUID()
         const rawFile = path.join(os.tmpdir(), `blitz-screenshot-${timestamp}.png`)
         const resizedFile = path.join(os.tmpdir(), `blitz-screenshot-${timestamp}-sm.png`)
 
-        if (isPhysicalDeviceUdid(udid)) {
-          const client = await getDeviceClient(udid)
-          const pngBuffer = await client.screenshot()
-          await fs.writeFile(rawFile, pngBuffer)
-        } else {
-          await new Promise<void>((resolve, reject) => {
-            execFile('xcrun', ['simctl', 'io', udid, 'screenshot', '--type=png', rawFile], { env: childEnv(), timeout: 10000 }, (error) => {
-              if (error) reject(error)
-              else resolve()
-            })
-          })
-        }
+        const resolvedUdid = await resolveActionUdid(udid)
+        const client = await getDeviceClient(resolvedUdid)
+        const pngBuffer = await client.screenshot()
+        await fs.writeFile(rawFile, pngBuffer, { mode: 0o600 })
 
         const sizeOutput = await new Promise<string>((resolve, reject) => {
-          execFile('sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', rawFile], { timeout: 5000 }, (error, stdout) => {
+          execFile('sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', rawFile], { env: simulatorEnv(), timeout: 5000 }, (error, stdout) => {
             if (error) reject(error)
             else resolve(stdout)
           })
         })
         const widthMatch = sizeOutput.match(/pixelWidth:\s*(\d+)/)
         const heightMatch = sizeOutput.match(/pixelHeight:\s*(\d+)/)
-        const targetWidth = Math.round(Number(widthMatch![1]) / 3)
-        const targetHeight = Math.round(Number(heightMatch![1]) / 3)
+        let targetWidth = Math.round(Number(widthMatch![1]) / 3)
+        let targetHeight = Math.round(Number(heightMatch![1]) / 3)
+        if (!isPhysicalDeviceUdid(resolvedUdid)) {
+          const size = await getIDBClient(resolvedUdid).getScreenSize()
+          const landscape = Number(widthMatch![1]) > Number(heightMatch![1])
+          targetWidth = landscape ? Math.max(size.width, size.height) : Math.min(size.width, size.height)
+          targetHeight = landscape ? Math.min(size.width, size.height) : Math.max(size.width, size.height)
+        }
         await new Promise<void>((resolve, reject) => {
           execFile(
             'sips',
             ['--resampleWidth', String(targetWidth), '--resampleHeight', String(targetHeight), rawFile, '--out', resizedFile],
-            { timeout: 5000 },
+            { env: simulatorEnv(), timeout: 5000 },
             (error) => {
               if (error) reject(error)
               else resolve()
@@ -490,10 +475,8 @@ Use the "query" parameter to search for a specific element by label (e.g. "Add t
 
 Without a query, returns all visible interactive elements on screen.
 
-Region options optimize scan time:
-- "top-left" / "top-right" / "bottom-left" / "bottom-right": ~250ms
-- "top-half" / "bottom-half": ~500ms
-- "full": ~1s (entire screen)
+Region options limit results to the selected portion of the screen.
+Simulator scans use the maintained IDB accessibility hierarchy.
 
 For the complete element tree (all types), use describe_screen instead.`,
       inputSchema: {
@@ -557,7 +540,7 @@ For the complete element tree (all types), use describe_screen instead.`,
         let simulators: { udid: string; name: string; state: string }[] = []
         try {
           const { stdout } = await new Promise<{ stdout: string }>((resolve, reject) => {
-            execFile('xcrun', ['simctl', 'list', 'devices', 'booted', '-j'], { timeout: 10000 }, (error, stdout) => {
+            execFile('xcrun', ['simctl', 'list', 'devices', 'booted', '-j'], { env: simulatorEnv(), timeout: 10000 }, (error, stdout) => {
               if (error) reject(error)
               else resolve({ stdout })
             })

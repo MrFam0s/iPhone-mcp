@@ -1,4 +1,4 @@
-import { getIDBClient } from './idb/idb-client.js'
+import { getIDBClient, resolveBootedUdid } from './idb/idb-client.js'
 import { WDAClient } from './wda/wda-client.js'
 import { wdaManager } from './wda/wda-manager.js'
 import { isPhysicalDeviceUdid, type DeviceClient } from './types.js'
@@ -11,5 +11,5 @@ export async function getDeviceClient(udid: string = 'booted'): Promise<DeviceCl
     const tunnelIP = await wdaManager.getTunnelAddress(udid)
     return WDAClient.getInstance(udid, 8100, tunnelIP)
   }
-  return getIDBClient(udid)
+  return getIDBClient(udid === 'booted' ? await resolveBootedUdid() : udid)
 }

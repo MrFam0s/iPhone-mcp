@@ -4,3 +4,7 @@ dist/
 .DS_Store
 .idea/
 .mcp.json
+
+# Python keyboard helper test artifacts
+__pycache__/
+*.py[cod]

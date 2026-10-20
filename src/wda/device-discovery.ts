@@ -17,19 +17,26 @@ export interface PhysicalDevice {
   wdaRunning: boolean
 }
 
+// Xcode 27 includes simulators in devicectl output. They are not USB devices.
+export function isPhysicalIOSDevice(device: {hardwareProperties?: {reality?: string; platform?: string; udid?: string}; connectionProperties?: {transportType?: string}}): boolean {
+  const hardware = device.hardwareProperties
+  if (!hardware?.udid || hardware.reality === 'simulated' || device.connectionProperties?.transportType === 'sameMachine') return false
+  return hardware.platform === 'iOS' || hardware.platform === 'iPadOS'
+}
+
 export async function listPhysicalDevices(): Promise<PhysicalDevice[]> {
   const devices: Map<string, PhysicalDevice> = new Map()
 
   try {
-    const { stdout } = await execAsync('xcrun devicectl list devices --json-output /dev/stdout 2>/dev/null', { env: childEnv() })
+    const { stdout } = await execAsync('xcrun devicectl list devices --json-output /dev/stdout 2>/dev/null', { env: childEnv(), timeout: 10000, maxBuffer: 8 * 1024 * 1024 })
     const jsonStart = stdout.indexOf('{')
     if (jsonStart < 0) throw new Error('No JSON in devicectl output')
     const json = JSON.parse(stdout.substring(jsonStart))
     const deviceList = json?.result?.devices ?? []
 
     for (const d of deviceList) {
-      const udid = d.hardwareProperties?.udid ?? d.identifier
-      if (!udid) continue
+      if (!isPhysicalIOSDevice(d)) continue
+      const udid = d.hardwareProperties.udid
 
       if (d.connectionProperties?.transportType === 'localNetwork' && !d.hardwareProperties?.platform?.includes('iOS')) {
         continue
@@ -56,7 +63,7 @@ export async function listPhysicalDevices(): Promise<PhysicalDevice[]> {
 
   if (devices.size === 0) {
     try {
-      const { stdout } = await execAsync('system_profiler SPUSBDataType -json 2>/dev/null', { env: childEnv() })
+      const { stdout } = await execAsync('system_profiler SPUSBDataType -json 2>/dev/null', { env: childEnv(), timeout: 10000, maxBuffer: 8 * 1024 * 1024 })
       const json = JSON.parse(stdout)
       const usbItems = json?.SPUSBDataType ?? []
 
